@@ -370,7 +370,7 @@ end
 # If the codepoint is unassigned or invalid, a pointer to a special struct is
 # returned in which `category` is 0 (@ref CATEGORY_CN).
 #
-function utf8proc_get_property(uc)
+function get_property(uc)
     return uc < 0 || uc >= 0x110000 ? _properties[1] : unsafe_get_property(uc);
 end
 
@@ -522,14 +522,111 @@ end
 #    utf8proc_int32_t codepoint1, utf8proc_int32_t codepoint2, utf8proc_int32_t *state)
 # ^ TODO
 
+# return whether there is a grapheme break between boundclasses lbc and tbc
+#  (according to the definition of extended grapheme clusters)
 #
- # Same as utf8proc_grapheme_break_stateful(), except without support for the
- # Unicode 9 additions to the algorithm. Supported for legacy reasons.
- #
-#utf8proc_bool utf8proc_grapheme_break(
-#    utf8proc_int32_t codepoint1, utf8proc_int32_t codepoint2)
-# ^ TODO
+# Rule numbering refers to TR29 Version 29 (Unicode 9.0.0):
+# http://www.unicode.org/reports/tr29/tr29-29.html
+#
+# CAVEATS:
+#  Please note that evaluation of GB10 (grapheme breaks between emoji zwj sequences)
+#  and GB 12/13 (regional indicator code points) require knowledge of previous characters
+#  and are thus not handled by this function. This may result in an incorrect break before
+#  an E_Modifier class codepoint and an incorrectly missing break between two
+#  REGIONAL_INDICATOR class code points if such support does not exist in the caller.
+#
+#  See the special support in grapheme_break_extended, for required bookkeeping by the caller.
+#
+function grapheme_break_simple(lbc, tbc)
+    (lbc == BOUNDCLASS_START) ? true :       # GB1
+    (lbc == BOUNDCLASS_CR &&                 # GB3
+     tbc == BOUNDCLASS_LF) ? false :         # ---
+    (lbc >= BOUNDCLASS_CR && lbc <= BOUNDCLASS_CONTROL) ? true :  # GB4
+    (tbc >= BOUNDCLASS_CR && tbc <= BOUNDCLASS_CONTROL) ? true :  # GB5
+    (lbc == BOUNDCLASS_L &&                  # GB6
+     (tbc == BOUNDCLASS_L ||                 # ---
+      tbc == BOUNDCLASS_V ||                 # ---
+      tbc == BOUNDCLASS_LV ||                # ---
+      tbc == BOUNDCLASS_LVT)) ? false :      # ---
+    ((lbc == BOUNDCLASS_LV ||                # GB7
+      lbc == BOUNDCLASS_V) &&                # ---
+     (tbc == BOUNDCLASS_V ||                 # ---
+      tbc == BOUNDCLASS_T)) ? false :        # ---
+    ((lbc == BOUNDCLASS_LVT ||               # GB8
+      lbc == BOUNDCLASS_T) &&                # ---
+     tbc == BOUNDCLASS_T) ? false :          # ---
+    (tbc == BOUNDCLASS_EXTEND ||             # GB9
+     tbc == BOUNDCLASS_ZWJ ||                # ---
+     tbc == BOUNDCLASS_SPACINGMARK ||        # GB9a
+     lbc == BOUNDCLASS_PREPEND) ? false :    # GB9b
+    (lbc == BOUNDCLASS_E_ZWG &&              # GB11 (requires additional handling below)
+     tbc == BOUNDCLASS_EXTENDED_PICTOGRAPHIC) ? false : # ----
+    (lbc == BOUNDCLASS_REGIONAL_INDICATOR &&          # GB12/13 (requires additional handling below)
+     tbc == BOUNDCLASS_REGIONAL_INDICATOR) ? false :  # ----
+    true # GB999
+end
 
+function grapheme_break_extended(lbc, tbc, licb, ticb, state)
+    # boundclass and indic_conjunct_break state
+    state_bc::UInt32 = 0
+    state_icb::UInt32 = 0
+    if state == 0 # state initialization
+        state_bc = lbc
+        state_icb = licb == INDIC_CONJUNCT_BREAK_CONSONANT ? licb : INDIC_CONJUNCT_BREAK_NONE
+    else # lbc and licb are already encoded in state
+        state_bc = state & 0xff  # 1st byte of state is bound class
+        state_icb = state >> 8   # 2nd byte of state is indic conjunct break
+    end
+
+    break_permitted = grapheme_break_simple(state_bc, tbc) &&
+       !(state_icb == INDIC_CONJUNCT_BREAK_LINKER
+        && ticb == INDIC_CONJUNCT_BREAK_CONSONANT) # GB9c
+
+    # Special support for GB9c.  Don't break between two consonants
+    # separated 1+ linker characters and 0+ extend characters in any order.
+    # After a consonant, we enter LINKER state after at least one linker.
+    if (ticb == INDIC_CONJUNCT_BREAK_CONSONANT
+        || state_icb == INDIC_CONJUNCT_BREAK_CONSONANT
+        || state_icb == INDIC_CONJUNCT_BREAK_EXTEND)
+        state_icb = ticb
+    elseif (state_icb == INDIC_CONJUNCT_BREAK_LINKER)
+        state_icb = ticb == INDIC_CONJUNCT_BREAK_EXTEND ?
+                    INDIC_CONJUNCT_BREAK_LINKER : ticb
+    end
+
+    # Special support for GB 12/13 made possible by GB999. After two RI
+    # class codepoints we want to force a break. Do this by resetting the
+    # second RI's bound class to BOUNDCLASS_OTHER, to force a break
+    # after that character according to GB999 (unless of course such a break is
+    # forbidden by a different rule such as GB9).
+    if (state_bc == tbc && tbc == BOUNDCLASS_REGIONAL_INDICATOR)
+        state_bc = BOUNDCLASS_OTHER
+        # Special support for GB11 (emoji extend* zwj / emoji)
+    elseif (state_bc == BOUNDCLASS_EXTENDED_PICTOGRAPHIC)
+        if (tbc == BOUNDCLASS_EXTEND) # fold EXTEND codepoints into emoji
+            state_bc = BOUNDCLASS_EXTENDED_PICTOGRAPHIC
+        elseif (tbc == BOUNDCLASS_ZWJ)
+            state_bc = BOUNDCLASS_E_ZWG; # state to record emoji+zwg combo
+        else
+            state_bc = tbc
+        end
+    else
+        state_bc = tbc
+    end
+
+    return (break_permitted, state_bc + (state_icb << 8))
+end
+
+function grapheme_break_stateful(c1::UInt32, c2::UInt32, state::Ref{UInt32})
+    p1 = get_property(c1)
+    p2 = get_property(c2)
+    break_permitted, newstate =
+        grapheme_break_extended(p1.boundclass, p2.boundclass,
+                                p1.indic_conjunct_break, p2.indic_conjunct_break,
+                                state[])
+    state[] = newstate
+    return break_permitted
+end
 
 #
  # Given a codepoint `c`, return the codepoint of the corresponding
@@ -555,37 +652,36 @@ end
 #utf8proc_int32_t utf8proc_totitle(utf8proc_int32_t c)
 # ^ TODO
 
-#
- # Given a codepoint `c`, return `1` if the codepoint corresponds to a lower-case character
- # and `0` otherwise.
- #
-#int utf8proc_islower(utf8proc_int32_t c)
-# ^ TODO
+# Given a codepoint `c`, return `1` if the codepoint corresponds to a lower-case character
+# and `0` otherwise.
+function islower(c::UInt32)
+    p = get_property(c)
+    return p.lowercase_seqindex != p.uppercase_seqindex && p.lowercase_seqindex == typemax(UInt16)
+end
 
-#
- # Given a codepoint `c`, return `1` if the codepoint corresponds to an upper-case character
- # and `0` otherwise.
- #
-#int utf8proc_isupper(utf8proc_int32_t c)
-# ^ TODO
+# Given a codepoint `c`, return `1` if the codepoint corresponds to an upper-case character
+# and `0` otherwise.
+function isupper(c::UInt32)
+    p = get_property(c)
+    return p.lowercase_seqindex != p.uppercase_seqindex && p.uppercase_seqindex == typemax(UInt16) && p.category != CATEGORY_LT
+end
 
+# Given a codepoint, return a character width analogous to `wcwidth(codepoint)`,
+# except that a width of 0 is returned for non-printable codepoints
+# instead of -1 as in `wcwidth`.
 #
- # Given a codepoint, return a character width analogous to `wcwidth(codepoint)`,
- # except that a width of 0 is returned for non-printable codepoints
- # instead of -1 as in `wcwidth`.
- #
- # @note
- # If you want to check for particular types of non-printable characters,
- # (analogous to `isprint` or `iscntrl`), use utf8proc_category().
-#int utf8proc_charwidth(utf8proc_int32_t codepoint)
-# ^ TODO
+# @note
+# If you want to check for particular types of non-printable characters,
+# (analogous to `isprint` or `iscntrl`), use utf8proc_category().
+function charwidth(c::UInt32)
+    return Int(get_property(c).charwidth)
+end
 
-#
- # Return the Unicode category for the codepoint (one of the
- # @ref utf8proc_category_t constants.)
- #
-#utf8proc_category_t utf8proc_category(utf8proc_int32_t codepoint)
-# ^TODO
+# Return the Unicode category for the codepoint (one of the
+# @ref utf8proc_category_t constants.)
+function category(c::UInt32)
+    return get_property(c).category
+end
 
 #
  # Return the two-letter (nul-terminated) Unicode category string for
