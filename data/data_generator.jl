@@ -341,6 +341,30 @@ let
     end
 end
 
+combination_array = UInt16[]
+for a in eachindex(comb1st_indices_firstoffsets)
+    offset = 0
+    push!(combination_array, comb1st_indices_firstoffsets[a])
+    push!(combination_array, comb1st_indices_lastoffsets[a])
+    for b in eachindex(comb2nd_indices_sorted_keys)
+        dm1 = comb2nd_indices_sorted_keys[b]
+        if offset > comb1st_indices_lastoffsets[a]
+            break
+        end
+        if offset >= comb1st_indices_firstoffsets[a]
+            v = get(comb_array[a], b, 0)
+            if dm1 in comb2nd_indices_nonbasic
+                push!(combination_array, (v & 0xFFFF0000) >> 16)
+            end
+            push!(combination_array, v & 0xFFFF)
+        end
+        offset += 1
+        if dm1 in comb2nd_indices_nonbasic
+            offset += 1
+        end
+    end
+end
+
 function utf16_encode(utf32_seq)
     enc = UInt16[]
     for cp in utf32_seq
@@ -502,9 +526,8 @@ function c_uint16(seqindex)
     end
 end
 
-function print_c_data_tables(io, sequences, prop_page_indices, prop_pages, deduplicated_props,
-                             comb1st_indices_firstoffsets, comb1st_indices_lastoffsets,
-                             comb2nd_indices_sorted_keys, comb_array, comb2nd_indices_nonbasic)
+function print_c_data_tables(io, sequences, prop_page_indices, prop_pages,
+                             deduplicated_props, combination_array)
     print(io, "static const utf8proc_uint16_t utf8proc_sequences[] = ")
     write_c_index_array(io, sequences.storage, 8)
     print(io, "static const utf8proc_uint16_t utf8proc_stage1table[] = ")
@@ -541,42 +564,14 @@ function print_c_data_tables(io, sequences, prop_page_indices, prop_pages, dedup
     end
     print(io, "};\n\n")
 
-    print(io, "static const utf8proc_uint16_t utf8proc_combinations[] = {\n  ")
-    i = 0
-    for a in eachindex(comb1st_indices_firstoffsets)
-        offset = 0
-        print(io, comb1st_indices_firstoffsets[a], ", ", comb1st_indices_lastoffsets[a], ", ")
-        for b in eachindex(comb2nd_indices_sorted_keys)
-            dm1 = comb2nd_indices_sorted_keys[b]
-            if offset > comb1st_indices_lastoffsets[a]
-                break
-            end
-            if offset >= comb1st_indices_firstoffsets[a]
-                i += 1
-                if i == 8
-                    i = 0
-                    print(io, "\n  ")
-                end
-                v = get(comb_array[a], b, 0)
-                if dm1 in comb2nd_indices_nonbasic
-                    print(io, (v & 0xFFFF0000) >> 16, ", ")
-                end
-                print(io, v & 0xFFFF, ", ")
-            end
-            offset += 1
-            if dm1 in comb2nd_indices_nonbasic
-                offset += 1
-            end
-        end
-        print(io, "\n")
-    end
-    print(io, "};\n\n")
+    print(io, "static const utf8proc_uint16_t utf8proc_combinations[] = ")
+    write_c_index_array(io, combination_array, 8)
 end
+
+#-------------------------------------------------------------------------------
 
 
 if !isinteractive()
-    print_c_data_tables(stdout, sequences, prop_page_indices, prop_pages, deduplicated_props,
-                        comb1st_indices_firstoffsets, comb1st_indices_lastoffsets,
-                        comb2nd_indices_sorted_keys, comb_array, comb2nd_indices_nonbasic)
+    print_c_data_tables(stdout, sequences, prop_page_indices, prop_pages, deduplicated_props, combination_array)
 end
 
