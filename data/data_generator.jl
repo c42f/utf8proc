@@ -569,9 +569,63 @@ function print_c_data_tables(io, sequences, prop_page_indices, prop_pages,
 end
 
 #-------------------------------------------------------------------------------
+function write_julia_array(io, name, array, linelen)
+    print(io, "const ", name, " = ", eltype(array), "[\n    ")
+    for (i,x) in enumerate(array)
+        ws = mod1(i, linelen) < linelen ? " " : "\n    "
+        print(io, x, ",", ws)
+    end
+    print(io, "]\n\n")
+end
 
+function julia_enum_name(prefix, str)
+    isnothing(str) ? "0" : "$(prefix)_$(Base.uppercase(str))"
+end
+
+function print_julia_data_tables(io, sequences, prop_page_indices, prop_pages,
+                                 deduplicated_props, combination_array)
+    write_julia_array(io, "_sequences", sequences.storage, 8)
+    write_julia_array(io, "_stage1table", prop_page_indices, 8)
+    write_julia_array(io, "_stage2table", prop_pages, 8)
+
+    print(io, """
+        const _properties = CharProperty[
+          CharProperty(0, 0, 0, 0, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, false, false,false,false, 1, BOUNDCLASS_OTHER, INDIC_CONJUNCT_BREAK_NONE),
+        """)
+    for prop in deduplicated_props
+        print(io, "  CharProperty(",
+              julia_enum_name("CATEGORY", prop.category), ", ",
+              prop.combining_class, ", ",
+              julia_enum_name("BIDI_CLASS", prop.bidi_class), ", ",
+              julia_enum_name("DECOMP_TYPE", prop.decomp_type), ", ",
+              prop.decomp_seqindex, ", ",
+              prop.casefold_seqindex, ", ",
+              prop.uppercase_seqindex, ", ",
+              prop.lowercase_seqindex, ", ",
+              prop.titlecase_seqindex, ", ",
+              prop.comb_index, ", ",
+              prop.bidi_mirrored, ", ",
+              prop.comp_exclusion, ", ",
+              prop.ignorable, ", ",
+              prop.control_boundary, ", ",
+              prop.charwidth, ", ",
+              julia_enum_name("BOUNDCLASS", prop.boundclass), ", ",
+              julia_enum_name("INDIC_CONJUNCT_BREAK", prop.indic_conjunct_break),
+              "),\n"
+        )
+    end
+    print(io, "]\n\n")
+
+    write_julia_array(io, "_combinations", combination_array, 8)
+end
 
 if !isinteractive()
-    print_c_data_tables(stdout, sequences, prop_page_indices, prop_pages, deduplicated_props, combination_array)
+    if length(ARGS) >= 1 && ARGS[1] == "Julia"
+        print_julia_data_tables(stdout, sequences, prop_page_indices, prop_pages,
+                                deduplicated_props, combination_array)
+    else
+        print_c_data_tables(stdout, sequences, prop_page_indices, prop_pages,
+                            deduplicated_props, combination_array)
+    end
 end
 
