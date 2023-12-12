@@ -353,9 +353,8 @@ const unicode_version = v"15.1.0"
 #utf8proc_ssize_t utf8proc_encode_char(utf8proc_int32_t codepoint, utf8proc_uint8_t *dst)
 
 function unsafe_get_property(uc)
-  # ASSERT: uc >= 0 && uc < 0x110000
-  # TODO: @inbounds?
-  return @inbounds _properties[_stage2table[_stage1table[uc >> 8 + 1] + uc & 0xFF + 1] + 1]
+    # ASSERT: uc >= 0 && uc < 0x110000
+    return @inbounds _properties[_stage2table[_stage1table[uc >> 8 + 1] + uc & 0xFF + 1] + 1]
 end
 
 #
@@ -372,6 +371,21 @@ end
 #
 function get_property(uc)
     return uc < 0 || uc >= 0x110000 ? _properties[1] : unsafe_get_property(uc);
+end
+
+function _seqindex_decode_entry(sequences, i)
+    entry_cp = sequences[i+1]
+    if (entry_cp & 0xF800) == 0xD800
+        i += 1
+        entry_cp = ((entry_cp & 0x03FF) << 10) | (sequences[i+1] & 0x03FF)
+        entry_cp += 0x10000
+    end
+    return entry_cp, i
+end
+
+function _seqindex_decode_index(seqindex)
+    ch, _ = _seqindex_decode_entry(_sequences, seqindex)
+    return ch
 end
 
 # Decompose a codepoint into an array of codepoints.
@@ -535,9 +549,9 @@ end
 #  an E_Modifier class codepoint and an incorrectly missing break between two
 #  REGIONAL_INDICATOR class code points if such support does not exist in the caller.
 #
-#  See the special support in grapheme_break_extended, for required bookkeeping by the caller.
+#  See the special support in _grapheme_break_extended, for required bookkeeping by the caller.
 #
-function grapheme_break_simple(lbc, tbc)
+function _grapheme_break_simple(lbc, tbc)
     (lbc == BOUNDCLASS_START) ? true :       # GB1
     (lbc == BOUNDCLASS_CR &&                 # GB3
      tbc == BOUNDCLASS_LF) ? false :         # ---
@@ -566,7 +580,7 @@ function grapheme_break_simple(lbc, tbc)
     true # GB999
 end
 
-function grapheme_break_extended(lbc, tbc, licb, ticb, state)
+function _grapheme_break_extended(lbc, tbc, licb, ticb, state)
     # boundclass and indic_conjunct_break state
     state_bc::UInt32 = 0
     state_icb::UInt32 = 0
@@ -578,7 +592,7 @@ function grapheme_break_extended(lbc, tbc, licb, ticb, state)
         state_icb = state >> 8   # 2nd byte of state is indic conjunct break
     end
 
-    break_permitted = grapheme_break_simple(state_bc, tbc) &&
+    break_permitted = _grapheme_break_simple(state_bc, tbc) &&
        !(state_icb == INDIC_CONJUNCT_BREAK_LINKER
         && ticb == INDIC_CONJUNCT_BREAK_CONSONANT) # GB9c
 
@@ -617,40 +631,40 @@ function grapheme_break_extended(lbc, tbc, licb, ticb, state)
     return (break_permitted, state_bc + (state_icb << 8))
 end
 
-function grapheme_break_stateful(c1::UInt32, c2::UInt32, state::Ref{UInt32})
+function grapheme_break_stateful(c1::UInt32, c2::UInt32, state::Ref{Int32})
     p1 = get_property(c1)
     p2 = get_property(c2)
     break_permitted, newstate =
-        grapheme_break_extended(p1.boundclass, p2.boundclass,
+        _grapheme_break_extended(p1.boundclass, p2.boundclass,
                                 p1.indic_conjunct_break, p2.indic_conjunct_break,
                                 state[])
     state[] = newstate
     return break_permitted
 end
 
-#
- # Given a codepoint `c`, return the codepoint of the corresponding
- # lower-case character, if any; otherwise (if there is no lower-case
- # variant, or if `c` is not a valid codepoint) return `c`.
- #
-# utf8proc_int32_t utf8proc_tolower(utf8proc_int32_t c)
-# ^ TODO
+# Given a codepoint `c`, return the codepoint of the corresponding
+# lower-case character, if any; otherwise (if there is no lower-case
+# variant, or if `c` is not a valid codepoint) return `c`.
+function tolower(c::UInt32)
+    cl = get_property(c).lowercase_seqindex
+    return cl != typemax(UInt16) ? _seqindex_decode_index(cl) : c
+end
 
-#
- # Given a codepoint `c`, return the codepoint of the corresponding
- # upper-case character, if any; otherwise (if there is no upper-case
- # variant, or if `c` is not a valid codepoint) return `c`.
- #
-# utf8proc_int32_t utf8proc_toupper(utf8proc_int32_t c)
-# ^ TODO
+# Given a codepoint `c`, return the codepoint of the corresponding
+# upper-case character, if any; otherwise (if there is no upper-case
+# variant, or if `c` is not a valid codepoint) return `c`.
+function toupper(c::UInt32)
+    cu = get_property(c).uppercase_seqindex
+    return cu != typemax(UInt16) ? _seqindex_decode_index(cu) : c
+end
 
-#
- # Given a codepoint `c`, return the codepoint of the corresponding
- # title-case character, if any; otherwise (if there is no title-case
- # variant, or if `c` is not a valid codepoint) return `c`.
- #
-#utf8proc_int32_t utf8proc_totitle(utf8proc_int32_t c)
-# ^ TODO
+# Given a codepoint `c`, return the codepoint of the corresponding
+# title-case character, if any; otherwise (if there is no title-case
+# variant, or if `c` is not a valid codepoint) return `c`.
+function totitle(c::UInt32)
+    cu = get_property(c).titlecase_seqindex
+    return cu != typemax(UInt16) ? _seqindex_decode_index(cu) : c
+end
 
 # Given a codepoint `c`, return `1` if the codepoint corresponds to a lower-case character
 # and `0` otherwise.
@@ -683,12 +697,14 @@ function category(c::UInt32)
     return get_property(c).category
 end
 
-#
- # Return the two-letter (nul-terminated) Unicode category string for
- # the codepoint (e.g. `"Lu"` or `"Co"`).
- #
-#const char *utf8proc_category_string(utf8proc_int32_t codepoint)
-# ^TODO
+
+const _category_names = ["Cn","Lu","Ll","Lt","Lm","Lo","Mn","Mc","Me","Nd","Nl","No","Pc","Pd","Ps","Pe","Pi","Pf","Po","Sm","Sc","Sk","So","Zs","Zl","Zp","Cc","Cf","Cs","Co"]
+
+# Return the two-letter (nul-terminated) Unicode category string for
+# the codepoint (e.g. `"Lu"` or `"Co"`).
+function category_string(c::UInt32)
+    return _category_names[category(c)+1]
+end
 
 #
  # Maps the given UTF-8 string pointed to by `str` to a new UTF-8
