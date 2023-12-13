@@ -103,10 +103,30 @@ const ERROR_NOTASSIGNED = -4
 # Invalid options have been used.
 const ERROR_INVALIDOPTS = -5
 
-# @name Types
+#-------------------------------------------------------------------------------
+# Internal constants
+const HANGUL_SBASE  = 0xAC00
+const HANGUL_LBASE  = 0x1100
+const HANGUL_VBASE  = 0x1161
+const HANGUL_TBASE  = 0x11A7
+const HANGUL_LCOUNT = 19
+const HANGUL_VCOUNT = 21
+const HANGUL_TCOUNT = 28
+const HANGUL_NCOUNT = 588
+const HANGUL_SCOUNT = 11172
+# END is exclusive
+const HANGUL_L_START  = 0x1100
+const HANGUL_L_END    = 0x115A
+const HANGUL_L_FILLER = 0x115F
+const HANGUL_V_START  = 0x1160
+const HANGUL_V_END    = 0x11A3
+const HANGUL_T_START  = 0x11A8
+const HANGUL_T_END    = 0x11FA
+const HANGUL_S_START  = 0xAC00
+const HANGUL_S_END    = 0xD7A4
+
 
 # Holds the value of a property.
-# C: utf8proc_propval_t
 const PropVal = Int16
 
 # Struct containing information about a codepoint.
@@ -147,31 +167,39 @@ function CharProperty(category, combining_class, bidi_class, decomp_type,
         decomp_seqindex, casefold_seqindex, uppercase_seqindex, lowercase_seqindex,
         titlecase_seqindex, comb_index, bidi_mirrored, comp_exclusion, ignorable,
         control_boundary, charwidth, boundclass, indic_conjunct_break)
-    flags = pack_flags(bidi_mirrored, comp_exclusion, ignorable, control_boundary,
-                       charwidth, boundclass, indic_conjunct_break)
+    flags = _pack_flags(bidi_mirrored, comp_exclusion, ignorable, control_boundary,
+                        charwidth, boundclass, indic_conjunct_break)
     CharProperty(category, combining_class, bidi_class, decomp_type,
                  decomp_seqindex, casefold_seqindex, uppercase_seqindex,
                  lowercase_seqindex, titlecase_seqindex, comb_index, flags)
 end
 
-function pack_flags(bidi_mirrored, comp_exclusion, ignorable, control_boundary,
-                    charwidth, boundclass, indic_conjunct_break)
+macro _pack_flag(flags, offset, flag, width)
+    flagmsg = "$flag out of range"
+    flag = esc(flag)
+    mask = (1 << width) - 1
+    width = esc(width)
+    flags = esc(flags)
+    offset = esc(offset)
+    quote
+        $flag & $mask == $flag || error($flagmsg)
+        $flags |= $flag << $offset
+        $offset += $width
+    end
+end
+
+function _pack_flags(bidi_mirrored, comp_exclusion, ignorable, control_boundary,
+                     charwidth, boundclass, indic_conjunct_break)
     flags = UInt16(0)
     bit_offset = 0
-    function pack_flag(f, width)
-        mask = (1 << width)-1
-        f & mask == f || error("Flag out of range")
-        flags |= (f & mask) << bit_offset
-        bit_offset += width
-    end
-    pack_flag(bidi_mirrored, 1)
-    pack_flag(comp_exclusion, 1)
-    pack_flag(ignorable, 1)
-    pack_flag(control_boundary, 1)
-    pack_flag(charwidth, 2)
-    pack_flag(0, 2)
-    pack_flag(boundclass, 6)
-    pack_flag(indic_conjunct_break, 2)
+    @_pack_flag flags bit_offset bidi_mirrored        1
+    @_pack_flag flags bit_offset comp_exclusion       1
+    @_pack_flag flags bit_offset ignorable            1
+    @_pack_flag flags bit_offset control_boundary     1
+    @_pack_flag flags bit_offset charwidth            2
+    @_pack_flag flags bit_offset 0                    2 # padding
+    @_pack_flag flags bit_offset boundclass           6
+    @_pack_flag flags bit_offset indic_conjunct_break 2
     flags
 end
 
@@ -373,55 +401,172 @@ function get_property(uc)
     return uc < 0 || uc >= 0x110000 ? _properties[1] : unsafe_get_property(uc);
 end
 
-function _seqindex_decode_entry(sequences, i)
-    entry_cp = sequences[i+1]
+# NB: `i` should be decoded to be 1-based at this point.
+function _seqindex_decode_entry(i)
+    entry_cp = UInt32(_sequences[i])
     if (entry_cp & 0xF800) == 0xD800
         i += 1
-        entry_cp = ((entry_cp & 0x03FF) << 10) | (sequences[i+1] & 0x03FF)
+        entry_cp = ((entry_cp & 0x03FF) << 10) | (_sequences[i] & 0x03FF)
         entry_cp += 0x10000
     end
-    return entry_cp, i
+    return entry_cp, i + 1
 end
 
 function _seqindex_decode_index(seqindex)
-    ch, _ = _seqindex_decode_entry(_sequences, seqindex)
+    ch, _ = _seqindex_decode_entry(seqindex + 1)
     return ch
 end
 
-# Decompose a codepoint into an array of codepoints.
- #
- # @param codepoint the codepoint.
- # @param dst the destination buffer.
- # @param bufsize the size of the destination buffer.
- # @param options one or more of the following flags:
- # - @ref REJECTNA  - return an error `codepoint` is unassigned
- # - @ref IGNORE    - strip "default ignorable" codepoints
- # - @ref CASEFOLD  - apply Unicode casefolding
- # - @ref COMPAT    - replace certain codepoints with their
- #                             compatibility decomposition
- # - @ref CHARBOUND - insert 0xFF bytes before each grapheme cluster
- # - @ref LUMP      - lump certain different codepoints together
- # - @ref STRIPMARK - remove all character marks
- # - @ref STRIPNA   - remove unassigned codepoints
- # @param last_boundclass
- # Pointer to an integer variable containing
- # the previous codepoint's (boundclass + indic_conjunct_break << 1) if the @ref CHARBOUND
- # option is used.  If the string is being processed in order, this can be initialized to 0 for
- # the beginning of the string, and is thereafter updated automatically.  Otherwise, this parameter is ignored.
- #
- # @return
- # In case of success, the number of codepoints written is returned; in case
- # of an error, a negative error code is returned (utf8proc_errmsg()).
- # @par
- # If the number of written codepoints would be bigger than `bufsize`, the
- # required buffer size is returned, while the buffer will be overwritten with
- # undefined data.
- #
-# utf8proc_ssize_t utf8proc_decompose_char(
-#   utf8proc_int32_t codepoint, utf8proc_int32_t *dst, utf8proc_ssize_t bufsize,
-#   utf8proc_option_t options, int *last_boundclass
-# )
-# ^TODO
+function _seqindex_write_char_decomposed(seqindex::UInt16, dst::Ptr{UInt32},
+                                         bufsize, options, last_boundclass)
+    written = 0
+    entry_idx = seqindex & 0x3FFF + 1
+    len = seqindex >> 14
+    if len >= 3
+        len = _sequences[entry_idx]
+        entry_idx += 1
+    end
+    while len >= 0
+        entry_cp, entry_idx = _seqindex_decode_entry(entry_idx)
+
+        # FIXME: last_boundclass ptr??
+        written += decompose_char(entry_cp, dst + written * sizeof(UInt32),
+                                  (bufsize > written) ? (bufsize - written) : 0, options,
+                                  last_boundclass)
+        if written < 0
+            return ERROR_OVERFLOW
+        end
+        len -= 1
+    end
+    return written
+end
+
+
+"""
+Decompose a codepoint into an array of codepoints.
+
+* `codepoint` the codepoint.
+* `dst` the destination buffer.
+* `bufsize` the size of the destination buffer.
+* `options` one or more of the following flags:
+    - `REJECTNA` - return an error `codepoint` is unassigned
+    - `IGNORE`   - strip "default ignorable" codepoints
+    - `CASEFOLD` - apply Unicode casefolding
+    - `COMPAT`   - replace certain codepoints with their
+                                compatibility decomposition
+    - `CHARBOUND`- insert 0xFF bytes before each grapheme cluster
+    - `LUMP`     - lump certain different codepoints together
+    - `STRIPMARK`- remove all character marks
+    - `STRIPNA`  - remove unassigned codepoints
+* `last_boundclass`
+    Pointer to an integer variable containing
+    the previous codepoint's (boundclass + indic_conjunct_break << 1) if the `CHARBOUND`
+    option is used.  If the string is being processed in order, this can be initialized to 0 for
+    the beginning of the string, and is thereafter updated automatically.  Otherwise, this parameter is ignored.
+
+In case of success, return the number of codepoints written is returned; in
+case of an error, a negative error code is returned (utf8proc_errmsg()).
+
+If the number of written codepoints would be bigger than `bufsize`, the
+required buffer size is returned, while the buffer will be overwritten with
+undefined data.
+"""
+function decompose_char(uc::UInt32, dst::Ptr{UInt32}, bufsize, options, last_boundclass)
+    if uc < 0 || uc >= 0x110000
+        return ERROR_NOTASSIGNED
+    end
+    property = unsafe_get_property(uc)
+    category = property.category
+
+    if options & (COMPOSE|DECOMPOSE) != 0
+        hangul_sindex = uc - HANGUL_SBASE
+        if hangul_sindex >= 0 && hangul_sindex < HANGUL_SCOUNT
+            if bufsize >= 1
+                unsafe_store!(dst, HANGUL_LBASE + hangul_sindex / HANGUL_NCOUNT, 1)
+                if bufsize >= 2
+                    unsafe_store!(dst, HANGUL_VBASE + (hangul_sindex % HANGUL_NCOUNT) / HANGUL_TCOUNT, 2)
+                end
+            end
+            hangul_tindex = hangul_sindex % HANGUL_TCOUNT
+            if hangul_tindex == 0
+                return 2
+            end
+            if bufsize >= 3
+                unsafe_store!(dst, HANGUL_TBASE + hangul_tindex, 3)
+            end
+            return 3
+        end
+    end
+    if (options & REJECTNA != 0) && category == 0
+        return ERROR_NOTASSIGNED
+    end
+    if (options & IGNORE != 0) && property.ignorable
+        return 0
+    end
+    if (options & STRIPNA != 0) && category == 0
+        return 0
+    end
+
+    if options & LUMP != 0
+        replacement_uc =
+            category == CATEGORY_ZS                                       ? 0x0020 :
+            uc == 0x2018 || uc == 0x2019 || uc == 0x02BC || uc == 0x02C8  ? 0x0027 :
+            category == CATEGORY_PD || uc == 0x2212                       ? 0x002D :
+            uc == 0x2044 || uc == 0x2215                                  ? 0x002F :
+            uc == 0x2236                                                  ? 0x003A :
+            uc == 0x2039 || uc == 0x2329 || uc == 0x3008                  ? 0x003C :
+            uc == 0x203A || uc == 0x232A || uc == 0x3009                  ? 0x003E :
+            uc == 0x2216                                                  ? 0x005C :
+            uc == 0x02C4 || uc == 0x02C6 || uc == 0x2038 || uc == 0x2303  ? 0x005E :
+            category == CATEGORY_PC || uc == 0x02CD                       ? 0x005F :
+            uc == 0x02CB                                                  ? 0x0060 :
+            uc == 0x2223                                                  ? 0x007C :
+            uc == 0x223C                                                  ? 0x007E :
+            (options & NLF2LS != 0) && (options & NLF2PS != 0) &&
+              (category == CATEGORY_ZL || category == CATEGORY_ZP)        ? 0x000A :
+            0x0000
+        if replacement_uc != 0x0000
+            return decompose_char(replacement_uc, dst, bufsize,
+                                  options & ~UInt32(LUMP), last_boundclass)
+        end
+    end
+
+    if options & STRIPMARK != 0
+        if (category == CATEGORY_MN || category == CATEGORY_MC || category == CATEGORY_ME)
+            return 0
+        end
+    end
+    if options & CASEFOLD != 0
+        if property.casefold_seqindex != typemax(UInt16)
+            return _seqindex_write_char_decomposed(property.casefold_seqindex, dst, bufsize, options, last_boundclass)
+        end
+    end
+    if options & (COMPOSE|DECOMPOSE) != 0
+        if property.decomp_seqindex != typemax(UInt16) &&
+            (property.decomp_type == 0 || (options & COMPAT != 0))
+            return _seqindex_write_char_decomposed(property.decomp_seqindex, dst, bufsize, options, last_boundclass)
+        end
+    end
+    if options & CHARBOUND != 0
+        boundary, last_boundclass[] =
+            _grapheme_break_extended(0, property.boundclass, 0, property.indic_conjunct_break,
+                                     last_boundclass[])
+        if boundary
+            if bufsize >= 1
+                unsafe_store!(dst, -1, 1) # sentinel value for grapheme break
+            end
+            if bufsize >= 2
+                unsafe_store!(dst, uc, 2)
+            end
+            return 2
+        end
+    end
+    if bufsize >= 1
+        unsafe_store!(dst, uc, 1)
+    end
+    return 1
+end
+
 
 #
  # The same as utf8proc_decompose_char(), but acts on a whole UTF-8
@@ -636,8 +781,8 @@ function grapheme_break_stateful(c1::UInt32, c2::UInt32, state::Ref{Int32})
     p2 = get_property(c2)
     break_permitted, newstate =
         _grapheme_break_extended(p1.boundclass, p2.boundclass,
-                                p1.indic_conjunct_break, p2.indic_conjunct_break,
-                                state[])
+                                 p1.indic_conjunct_break, p2.indic_conjunct_break,
+                                 state[])
     state[] = newstate
     return break_permitted
 end
